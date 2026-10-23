@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Endpoint Console</title>
+<style>
+:root{--bg:#e8edf1;--panel:#fff;--ink:#14212b;--mute:#5d6b77;--line:#cfd8df;--acc:#2457f5;--acc-ink:#fff;--ok:#1e8e5a;--bad:#c7372f;--me:#dfe8ff}
+@media (prefers-color-scheme:dark){:root{--bg:#10171d;--panel:#18222a;--ink:#e6edf2;--mute:#8d9ba6;--line:#2b3943;--acc:#6b8cff;--acc-ink:#0b1220;--ok:#4cc88c;--bad:#ff7b72;--me:#22304f}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 "Avenir Next","Segoe UI",system-ui,sans-serif;display:grid;grid-template-columns:320px 1fr;gap:12px;padding:12px}
+aside,main{background:var(--panel);border:1px solid var(--line);border-radius:10px;min-height:0;display:flex;flex-direction:column}
+aside{padding:16px;overflow:auto;gap:12px}
+h1{font-size:1.15rem;margin:0}
+h2{font-size:.9rem;margin:8px 0 0;color:var(--mute);font-weight:600}
+label{display:block;font-size:.85rem;color:var(--mute);margin-bottom:4px}
+input,select,textarea,button{font:inherit;color:var(--ink)}
+input,select,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+button{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:9px 14px;cursor:pointer}
+button.primary{background:var(--acc);color:var(--acc-ink);border-color:var(--acc);font-weight:600}
+button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:8px}
+#status{font-size:.85rem;color:var(--mute)}
+#status.ok{color:var(--ok)}#status.bad{color:var(--bad)}
+#log{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg);flex:1;min-height:120px}
+#log div{white-space:nowrap}
+.s2{color:var(--ok)}.s4{color:var(--bad)}
+#msgs{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+.m{max-width:75ch;padding:10px 14px;border-radius:10px;white-space:pre-wrap;word-wrap:break-word}
+.m.user{align-self:flex-end;background:var(--me)}
+.m.bot{align-self:flex-start;border:1px solid var(--line)}
+.m.err{color:var(--bad);border-color:var(--bad)}
+.empty{margin:auto;color:var(--mute);text-align:center;max-width:36ch}
+form{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
+textarea{resize:none;height:48px}
+@media(max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 1fr;height:auto;min-height:100%}main{min-height:70vh}}
+</style>
+</head>
+<body>
+<aside>
+  <h1>Endpoint Console</h1>
+  <div><label for="base">Base URL</label><input id="base" value="http://127.0.0.1:31415" autocomplete="off"></div>
+  <div><label for="token">Auth token</label><input id="token" type="password" value="freellmapi-3f451f17ee88c6bb722ede3e867dd7fb38e440a666ffd7cc" autocomplete="off"></div>
+  <div><label for="model">Model</label>
+    <select id="model"><option value="auto">auto</option></select></div>
+  <div class="row"><button id="test">Test connection</button><button id="clear">Clear chat</button></div>
+  <div id="status">Not connected yet.</div>
+  <h2>Request log</h2>
+  <div id="log" aria-live="polite"></div>
+</aside>
+<main>
+  <div id="msgs"><div class="empty" id="empty">Select a model, then send a message. Each call to your endpoint appears in the request log.</div></div>
+  <form id="f">
+    <textarea id="in" placeholder="Message" aria-label="Message"></textarea>
+    <button class="primary" id="send">Send</button>
+  </form>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const hist=[];
+const cfg=()=>({base:$('base').value.replace(/\/+$/,''),token:$('token').value.trim()});
+const headers=()=>{const{token}=cfg();return{'Content-Type':'application/json','Authorization':'Bearer '+token,'x-api-key':token,'anthropic-version':'2023-06-01'}};
+
+function log(method,path,status,ms){
+  const d=document.createElement('div');
+  d.className='s'+String(status)[0];
+  d.textContent=`${method} ${path} ${status} ${ms}ms`;
+  $('log').prepend(d);
+}
+function setStatus(t,c){$('status').textContent=t;$('status').className=c||''}
+
+async function call(method,path,body,stream){
+  const t=performance.now();
+  try{
+    const r=await fetch(cfg().base+path,{method,headers:headers(),body:body?JSON.stringify(body):undefined});
+    log(method,path,r.status,Math.round(performance.now()-t));
+    return r;
+  }catch(e){
+    log(method,path,'ERR',Math.round(performance.now()-t));
+    throw e;
+  }
+}
+
+async function loadModels(){
+  setStatus('Connecting…');
+  try{
+    const r=await call('GET','/v1/models');
+    if(!r.ok)throw new Error('Server returned '+r.status+'. Check the token.');
+    const j=await r.json();
+    const ids=(j.data||[]).map(m=>m.id);
+    if(!ids.includes('auto'))ids.unshift('auto');
+    const cur=$('model').value;
+    $('model').innerHTML=ids.map(i=>`<option>${i.replace(/</g,'&lt;')}</option>`).join('');
+    $('model').value=ids.includes(cur)?cur:'auto';
+    setStatus(`Connected. ${ids.length} model${ids.length>1?'s':''} available.`,'ok');
+  }catch(e){
+    setStatus(e.message.includes('Failed to fetch')
+      ?'Cannot reach the server. Start it, and allow this page’s origin (CORS).'
+      :e.message,'bad');
+  }
+}
+
+function add(role,text,cls){
+  $('empty')?.remove();
+  const d=document.createElement('div');
+  d.className='m '+role+(cls?' '+cls:'');
+  d.textContent=text;
+  $('msgs').append(d);
+  $('msgs').scrollTop=1e9;
+  return d;
+}
+
+async function send(text){
+  hist.push({role:'user',content:text});
+  add('user',text);
+  const out=add('bot','…');
+  $('send').disabled=true;
+  try{
+    const r=await call('POST','/v1/messages',{model:$('model').value,max_tokens:1024,stream:true,messages:hist});
+    if(!r.ok)throw new Error(`Request failed (${r.status}): ${(await r.text()).slice(0,300)}`);
+    const ct=r.headers.get('content-type')||'';
+    let full='';
+    if(ct.includes('text/event-stream')){
+      const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
+      for(;;){
+        const{done,value}=await rd.read();if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        const lines=buf.split('\n');buf=lines.pop();
+        for(const l of lines){
+          if(!l.startsWith('data:'))continue;
+          try{const e=JSON.parse(l.slice(5));
+            if(e.type==='content_block_delta'&&e.delta?.text){full+=e.delta.text;out.textContent=full;$('msgs').scrollTop=1e9}
+          }catch{}
+        }
+      }
+    }else{
+      const j=await r.json();
+      full=(j.content||[]).map(c=>c.text||'').join('')||JSON.stringify(j);
+      out.textContent=full;
+    }
+    hist.push({role:'assistant',content:full||' '});
+  }catch(e){
+    out.textContent=e.message.includes('Failed to fetch')?'Cannot reach the server. Check the base URL and CORS settings.':e.message;
+    out.classList.add('err');
+    hist.pop();
+  }finally{$('send').disabled=false;$('in').focus()}
+}
+
+$('f').addEventListener('submit',e=>{e.preventDefault();const t=$('in').value.trim();if(!t)return;$('in').value='';send(t)});
+$('in').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('f').requestSubmit()}});
+$('test').onclick=loadModels;
+$('clear').onclick=()=>{hist.length=0;$('msgs').innerHTML='<div class="empty" id="empty">Chat cleared.</div>'};
+loadModels();
+</script>
+</body>
+</html>
